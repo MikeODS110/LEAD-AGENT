@@ -255,6 +255,8 @@ harvey leads connect                 # one-time Google sign-in (read-only)
 harvey leads add <sheet link>        # import now, and keep re-reading it
 harvey leads add <Drive file link>   # an Excel (.xlsx) or CSV file on Drive
 harvey leads add <Drive folder link> # every sheet, Excel and CSV file in that folder
+harvey leads add "name:domain data"  # every file whose name contains "domain data",
+                                     # shared with you included: new ones are found too
 harvey leads list                    # what's saved, and when it last ran
 harvey leads sync                    # re-read everything saved, now
 harvey leads import leads.csv        # a one-off file, not saved

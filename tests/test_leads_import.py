@@ -289,3 +289,57 @@ def test_old_xls_says_what_to_do():
             await client.file_tables({"id": "x", "name": "leads.xls",
                                       "mimeType": gd.OLD_XLS_MIME})
     _run(go())
+
+
+def test_name_source_parses():
+    assert gd.parse_google_url("name: domain data") == ("name", "domain data", "")
+    assert gd.parse_google_url("name:") is None
+
+
+def test_name_search_imports_every_matching_file(monkeypatch):
+    monkeypatch.setattr(gd, "is_connected", lambda: True)
+    asked = {}
+
+    async def fake_get(self, url, params=None):
+        asked.update(params or {})
+
+        class Resp:
+            def json(self):
+                return {"files": [
+                    {"id": "f1", "name": "27 Oct domain data.xlsx", "mimeType": gd.XLSX_MIME},
+                    {"id": "f2", "name": "28 Oct domain data.xlsx", "mimeType": gd.XLSX_MIME},
+                ]}
+        return Resp()
+
+    books = {"f1": _xlsx({"Leads": [["Email"], ["ada@acme.example"]]}),
+             "f2": _xlsx({"Leads": [["Email"], ["ada@acme.example"], ["bo@widget.example"]]})}
+
+    async def download(self, file_id):
+        return books[file_id]
+
+    monkeypatch.setattr(gd.DriveClient, "_get", fake_get)
+    monkeypatch.setattr(gd.DriveClient, "download", download)
+    with tempfile.TemporaryDirectory() as tmp:
+        async def go():
+            sm = await _state(tmp)
+            report = await li.import_source(sm, "name:it's domain data", verify=_verified)
+            assert report.new_prospects == 2 and report.already_known == 1
+        _run(go())
+    # Quotes are escaped, and shared-with-me / shared drives are searched.
+    assert "name contains 'it\\'s domain data'" in asked["q"]
+    assert asked["corpora"] == "allDrives"
+
+
+def test_name_search_with_no_match_says_so(monkeypatch):
+    monkeypatch.setattr(gd, "is_connected", lambda: True)
+
+    async def none(self, name, limit=30):
+        return []
+
+    monkeypatch.setattr(gd.DriveClient, "search_files", none)
+    with tempfile.TemporaryDirectory() as tmp:
+        async def go():
+            sm = await _state(tmp)
+            report = await li.import_source(sm, "name:domain data")
+            assert "no sheet" in report.errors[0]
+        _run(go())

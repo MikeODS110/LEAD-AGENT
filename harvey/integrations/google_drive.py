@@ -44,6 +44,8 @@ TIMEOUT = httpx.Timeout(connect=10.0, read=60.0, write=30.0, pool=10.0)
 # A lead file bigger than this is not a lead file.
 MAX_DOWNLOAD_BYTES = 20_000_000
 MAX_FOLDER_FILES = 200
+# Newest files a name search reads each time.
+MAX_SEARCH_FILES = 30
 
 SHEET_MIME = "application/vnd.google-apps.spreadsheet"
 CSV_MIMES = ("text/csv", "text/plain", "application/csv")
@@ -67,9 +69,16 @@ def client_credentials(env) -> tuple[str, str]:
     return cid, secret
 
 
+NAME_PREFIX = "name:"
+
+
 def parse_google_url(text: str) -> tuple[str, str, str] | None:
-    """("sheet" | "folder" | "file", id, gid) for a Google link, else None."""
+    """("sheet" | "folder" | "file" | "name", id or name, gid) for a Google
+    link or a ``name:`` search, else None."""
     text = (text or "").strip()
+    if text.lower().startswith(NAME_PREFIX):
+        name = text[len(NAME_PREFIX):].strip()
+        return ("name", name, "") if name else None
     if m := _SHEET_RE.search(text):
         query = urllib.parse.urlparse(text)
         params = urllib.parse.parse_qs(query.query)
@@ -312,6 +321,22 @@ class DriveClient:
             return [(f"{name} / {tab}", rows)
                     for tab, rows in parse_xlsx(await self.download(file_id))]
         return [(name, await self.csv_file(file_id))]
+
+    async def search_files(self, name: str, limit: int = MAX_SEARCH_FILES) -> list[dict]:
+        """Sheets, Excel and CSV files whose name contains ``name``, newest
+        first: in My Drive, shared with me, and shared drives."""
+        escaped = name.replace("\\", "\\\\").replace("'", "\\'")
+        mimes = " or ".join(f"mimeType = '{m}'" for m in (SHEET_MIME, XLSX_MIME, *CSV_MIMES))
+        params = {
+            "q": f"name contains '{escaped}' and trashed = false and ({mimes})",
+            "fields": "files(id,name,mimeType,modifiedTime)",
+            "orderBy": "modifiedTime desc",
+            "pageSize": str(limit),
+            "corpora": "allDrives",
+            "supportsAllDrives": "true",
+            "includeItemsFromAllDrives": "true",
+        }
+        return ((await self._get(f"{DRIVE_API}/files", params)).json().get("files") or [])[:limit]
 
     async def folder_files(self, folder_id: str) -> list[dict]:
         """Sheets, Excel and CSV files directly in a folder, newest first."""

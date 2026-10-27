@@ -213,14 +213,20 @@ async def read_source(source: str, env) -> list[tuple[str, list[list[str]]]]:
         if not gd.is_connected():
             if kind == "sheet":
                 return [(source, await gd.fetch_public_csv(gd.public_csv_url(file_id, gid)))]
-            raise gd.DriveError("reading a Drive folder or file needs 'harvey leads connect' first.")
+            raise gd.DriveError("reading a Drive folder, file or name search needs "
+                                "'harvey leads connect' first.")
         drive = gd.DriveClient(env)
         if kind == "sheet":
             return await drive.sheet_tables(file_id, gid)
         if kind == "file":
             return await drive.file_tables(await drive.file_info(file_id))
+        files = (await drive.search_files(file_id) if kind == "name"
+                 else await drive.folder_files(file_id))
+        if kind == "name" and not files:
+            raise gd.DriveError(f"no sheet, Excel or CSV file whose name contains "
+                                f"'{file_id}' is visible to the signed-in account.")
         tables = []
-        for f in await drive.folder_files(file_id):
+        for f in files:
             try:
                 tables.extend(await drive.file_tables(f))
             except gd.DriveError as e:

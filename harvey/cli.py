@@ -484,7 +484,7 @@ def cmd_leads(args):
         sources = await leads_import.saved_sources(state)
         target = (args.source or "").strip()
         if args.leads_action in ("add", "remove", "import") and not target:
-            print(f"\n  Usage: harvey leads {args.leads_action} <sheet link, Drive folder link or CSV>\n")
+            print(f"\n  Usage: harvey leads {args.leads_action} <sheet/folder link, name:<file name> or CSV>\n")
             sys.exit(2)
 
         if args.leads_action == "list":
@@ -1127,7 +1127,7 @@ def main():
              "sources; sync: re-read all saved sources now; import: import once "
              "without saving")
     sub.add_argument("source", nargs="?", default="",
-                     help="Google Sheet, Drive file or folder link, CSV URL, or a CSV/.xlsx file")
+                     help="Google Sheet, Drive file or folder link, name:<part of a file name> (finds new files as they appear), CSV URL, or a CSV/.xlsx file")
     sub.set_defaults(func=cmd_leads)
 
     # harvey outbox
