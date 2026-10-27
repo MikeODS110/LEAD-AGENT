@@ -627,6 +627,10 @@ class EnvConfig(BaseModel):
     # Native mail providers (channels.email.provider: gmail | smtp)
     gmail_client_id: str = ""
     gmail_client_secret: str = ""
+    # Google Drive, read-only, for lead sheets (harvey leads connect).
+    # Empty means the Gmail pair above is used.
+    google_client_id: str = ""
+    google_client_secret: str = ""
     smtp_host: str = ""
     smtp_port: int = 587
     smtp_username: str = ""
@@ -744,6 +748,8 @@ def load_env() -> EnvConfig:
         zerobounce_api_key=os.getenv("ZEROBOUNCE_API_KEY", "").strip(),
         gmail_client_id=os.getenv("GMAIL_CLIENT_ID", "").strip(),
         gmail_client_secret=os.getenv("GMAIL_CLIENT_SECRET", "").strip(),
+        google_client_id=os.getenv("GOOGLE_CLIENT_ID", "").strip(),
+        google_client_secret=os.getenv("GOOGLE_CLIENT_SECRET", "").strip(),
         smtp_host=os.getenv("SMTP_HOST", "").strip(),
         smtp_port=int(os.getenv("SMTP_PORT", "587").strip() or 587),
         smtp_username=os.getenv("SMTP_USERNAME", "").strip(),

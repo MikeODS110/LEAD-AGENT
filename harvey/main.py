@@ -18,6 +18,7 @@ from harvey.integrations.mail_provider import NATIVE_PROVIDERS
 from harvey.pidfile import (
     LOCK_FILE, hold_loop_lock, read_pid, release_loop_lock, remove_pid_file, write_pid_file,
 )
+from harvey.collectors.leads_import import run_sync_stage
 from harvey.pipeline import run_profile_stage
 from harvey.state import StateManager
 
@@ -418,6 +419,11 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
             # turns a name and a domain into something worth writing about.
             if summary.get("unprofiled", 0):
                 tasks.append(("profile", run_profile_stage(state, limit=25, config=config)))
+
+            # Saved lead sheets are re-read every few hours (no model call).
+            # Imported people are verified and profiled like any others.
+            if not send_only:
+                tasks.append(("import_leads", run_sync_stage(state, config=config, env=env)))
 
             outcomes = await _run_agents(tasks)
 

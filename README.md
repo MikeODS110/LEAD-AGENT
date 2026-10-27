@@ -242,6 +242,34 @@ That is a campaign with a reason behind it. You know exactly why each of those 2
 
 ---
 
+## Importing your own lead sheets
+
+Already get leads from somewhere else, say a Google Sheet that fills up every
+day? Harvey can import it and work those people like anyone it found itself:
+it profiles their website, verifies the email, writes, and waits for your
+approval as usual. It works with any mail provider, Outlook included, because
+it only asks Google for **read-only Drive access**, never your mailbox.
+
+```bash
+harvey leads connect                 # one-time Google sign-in (read-only)
+harvey leads add <sheet link>        # import now, and keep re-reading it
+harvey leads add <Drive folder link> # every sheet and CSV in that folder
+harvey leads list                    # what's saved, and when it last ran
+harvey leads sync                    # re-read everything saved, now
+harvey leads import leads.csv        # a one-off file, not saved
+```
+
+`harvey run` re-reads saved sources every 6 hours. Columns are matched by
+header name (Email, Name or First/Last Name, Company, Website, Title, Phone,
+Notes, and the usual variations), so the sheet doesn't need reformatting. A
+row needs an email, or a website so Harvey can find the right person there.
+People already on file, opted out, or on the do-not-contact list are
+skipped, so re-reading a growing sheet is safe. A sheet shared as "anyone
+with the link" can be added without `harvey leads connect`. Setup for the
+sign-in is in `.env.example` under LEAD SHEETS.
+
+---
+
 ## The prospecting pipeline
 
 Four stages. Each one runs independently, re-runs safely, and states its cost.

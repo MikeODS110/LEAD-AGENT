@@ -448,6 +448,91 @@ def cmd_gmail(args):
         asyncio.run(_test())
 
 
+def cmd_leads(args):
+    """Lead sheets: import leads from Google Sheets, a Drive folder or a CSV."""
+    from harvey.config import load_env
+    from harvey.integrations import google_drive
+
+    env = load_env()
+    if args.leads_action == "connect":
+        ok = google_drive.run_auth_flow(*google_drive.client_credentials(env))
+        sys.exit(0 if ok else 1)
+
+    from harvey.collectors import leads_import
+    from harvey.state import StateManager
+
+    def _config():
+        from harvey.config import ConfigError, load_config
+        try:
+            return load_config()
+        except (ConfigError, Exception) as e:
+            print(f"  Note: config not loaded ({e}); the do-not-contact list isn't applied.")
+            return None
+
+    def _print(report):
+        print(f"\n  {report.summary_line()}")
+        for problem in report.errors:
+            print(f"  ✗ {problem}")
+        if report.new_prospects and report.sendable < report.new_prospects:
+            print("  Contacts whose email couldn't be verified stay on file but are never")
+            print("  emailed. Add REOON_API_KEY (free tier) to .env so Harvey can verify them.")
+        print()
+
+    async def _run():
+        state = StateManager()
+        await state.init_db()
+        sources = await leads_import.saved_sources(state)
+        target = (args.source or "").strip()
+        if args.leads_action in ("add", "remove", "import") and not target:
+            print(f"\n  Usage: harvey leads {args.leads_action} <sheet link, Drive folder link or CSV>\n")
+            sys.exit(2)
+
+        if args.leads_action == "list":
+            print(f"\n  Google Drive: {'connected (read-only)' if google_drive.is_connected() else 'not connected'}")
+            if not sources:
+                print("  No saved lead sources. Add one: harvey leads add <sheet link>\n")
+                return
+            print("  Saved lead sources (re-read every "
+                  f"{leads_import.SYNC_EVERY_HOURS} hours while 'harvey run' is on):")
+            for s in sources:
+                print(f"    - {s}")
+            last = await state.get_setting(leads_import.SYNCED_AT_KEY, "")
+            print(f"  Last imported: {last or 'never'}\n")
+            return
+
+        if args.leads_action == "remove":
+            if target not in sources:
+                print("\n  That source isn't saved. 'harvey leads list' shows the saved ones.\n")
+                sys.exit(1)
+            await leads_import.save_sources(state, [s for s in sources if s != target])
+            print("\n  ✓ Removed. Leads already imported from it stay.\n")
+            return
+
+        config = _config()
+        if args.leads_action == "sync":
+            if not sources:
+                print("\n  No saved lead sources. Add one: harvey leads add <sheet link>\n")
+                return
+            print(f"\n  Importing from {len(sources)} saved source(s)...")
+            _print(await leads_import.sync_saved(state, config=config, env=env))
+            return
+
+        print(f"\n  Reading {target} ...")
+        report = await leads_import.import_source(state, target, config=config, env=env)
+        _print(report)
+        if args.leads_action == "add":
+            if report.errors and not report.tables:
+                print("  Not saved, since it couldn't be read.\n")
+                sys.exit(1)
+            await leads_import.save_sources(state, sources + [target])
+            print("  ✓ Saved. 'harvey run' re-reads it every "
+                  f"{leads_import.SYNC_EVERY_HOURS} hours and imports new rows.\n")
+        elif report.errors:
+            sys.exit(1)
+
+    asyncio.run(_run())
+
+
 def cmd_microsoft(args):
     """Microsoft 365 provider utilities (auth / test)."""
     from harvey.config import load_env
@@ -1031,6 +1116,19 @@ def main():
     sub.add_argument("microsoft_action", choices=["auth", "test"],
                      help="auth: one-time sign-in; test: verify connection")
     sub.set_defaults(func=cmd_microsoft)
+
+    # harvey leads connect|add|remove|list|sync|import
+    sub = subparsers.add_parser(
+        "leads", help="Import leads from Google Sheets, a Drive folder or a CSV")
+    sub.add_argument(
+        "leads_action", choices=["connect", "add", "remove", "list", "sync", "import"],
+        help="connect: sign in to Google Drive (read-only); add: import a source now "
+             "and keep re-reading it; remove: stop re-reading one; list: saved "
+             "sources; sync: re-read all saved sources now; import: import once "
+             "without saving")
+    sub.add_argument("source", nargs="?", default="",
+                     help="Google Sheet link, Drive folder link, CSV URL or CSV file")
+    sub.set_defaults(func=cmd_leads)
 
     # harvey outbox
     sub = subparsers.add_parser("outbox", help="Review/approve queued emails")

@@ -293,6 +293,7 @@ Users will come back with questions and tasks. Common ones:
 - **"I want to change what Harvey says"** → Skills are in `skills/`, prompts are in `prompts/`. Both are plain markdown files. Edit them directly.
 - **"Train Harvey on a different product"** → `harvey train <new-url>`
 - **"How do I see the database?"** → It's at `data/harvey.db`. They can open it with any SQLite tool, or ask you to query it.
+- **"Import my lead sheet" / "I get leads in Google Sheets"** → `harvey leads connect` (one-time, read-only Drive; needs GOOGLE_CLIENT_ID/SECRET in `.env`, see the LEAD SHEETS block in `.env.example`), then `harvey leads add <sheet or folder link>`. `harvey run` re-reads it every 6 hours; duplicates, opt-outs and do-not-contact entries are skipped. See "Importing your own lead sheets" in the README.
 - **"I just want the prospect list"** → `harvey export` writes a sequencer-ready CSV (verified/risky emails only; `--all` for everything). Also available as Export buttons on the dashboard's Contacts tab. Harvey is valuable purely as a list-builder even if the user never lets it send.
 
 ---
@@ -338,6 +339,9 @@ harvey gmail test            # Verify the Gmail connection
 harvey outbox                # Review queued emails; --approve <id> / --approve-all / --reject <id>
 harvey signals               # The signal vocabulary; --confirm / --reject CODES (or 'free' / 'all')
 harvey discover              # Find businesses; --providers / --estimate / --provider <key>
+harvey leads connect         # Google Drive sign-in, read-only (works with any mail provider)
+harvey leads add <link>      # Import a Google Sheet / Drive folder / CSV now, and re-read it every 6h
+harvey leads list|sync       # Saved lead sources; re-read them now
 harvey sending pause|resume  # Kill switch for all outbound
 harvey warmup [domain]       # Sending-domain readiness: SPF/DKIM/DMARC, age, blocklists, ramp, TrulyInbox warmup
 harvey trulyinbox [connect|other]  # Warmup service: connect TrulyInbox, or record another service
