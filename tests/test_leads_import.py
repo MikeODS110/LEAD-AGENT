@@ -326,7 +326,7 @@ def test_name_search_imports_every_matching_file(monkeypatch):
             assert report.new_prospects == 2 and report.already_known == 1
         _run(go())
     # Quotes are escaped, and shared-with-me / shared drives are searched.
-    assert "name contains 'it\\'s domain data'" in asked["q"]
+    assert "name contains 'it\\'s' and name contains 'domain' and name contains 'data'" in asked["q"]
     assert asked["corpora"] == "allDrives"
 
 
@@ -337,9 +337,80 @@ def test_name_search_with_no_match_says_so(monkeypatch):
         return []
 
     monkeypatch.setattr(gd.DriveClient, "search_files", none)
+    monkeypatch.setattr(gd.DriveClient, "search_any", none)
     with tempfile.TemporaryDirectory() as tmp:
         async def go():
             sm = await _state(tmp)
             report = await li.import_source(sm, "name:domain data")
-            assert "no sheet" in report.errors[0]
+            assert "no file whose name contains 'domain data'" in report.errors[0]
         _run(go())
+
+
+def test_name_search_names_files_it_cannot_read(monkeypatch):
+    monkeypatch.setattr(gd, "is_connected", lambda: True)
+
+    async def none(self, name, limit=30):
+        return []
+
+    async def slides(self, name, limit=5):
+        return [{"id": "s1", "name": "domain data deck",
+                 "mimeType": "application/vnd.google-apps.presentation"}]
+
+    monkeypatch.setattr(gd.DriveClient, "search_files", none)
+    monkeypatch.setattr(gd.DriveClient, "search_any", slides)
+    with tempfile.TemporaryDirectory() as tmp:
+        async def go():
+            sm = await _state(tmp)
+            report = await li.import_source(sm, "name:domain data")
+            assert "'domain data deck' (Google presentation)" in report.errors[0]
+        _run(go())
+
+
+def test_doc_tables_are_read_as_rows():
+    html = ("<html><body><p>Leads</p><table>"
+            "<tr><td>Name</td><td>Email</td><td>Website</td></tr>"
+            "<tr><td>Ada Example</td><td>ada@acme.example</td><td>acme.example</td></tr>"
+            "</table></body></html>")
+    tables = gd.parse_doc_html(html)
+    leads, _ = li.rows_to_leads(tables[0][1])
+    assert [(lead.first_name, lead.email, lead.domain) for lead in leads] == [
+        ("Ada", "ada@acme.example", "acme.example")]
+
+
+def test_doc_lines_without_a_table():
+    html = ("<html><body><p>October domains</p>"
+            "<p>acme.example - ada@acme.example - roofing</p>"
+            "<p>widget.example</p><p>nothing here</p></body></html>")
+    tables = gd.parse_doc_html(html)
+    leads, _ = li.rows_to_leads(tables[0][1])
+    assert [(lead.email, lead.domain) for lead in leads] == [
+        ("ada@acme.example", "acme.example"), ("", "widget.example")]
+    assert "roofing" in leads[0].notes
+
+
+def test_drive_doc_file_is_exported_as_html(monkeypatch):
+    monkeypatch.setattr(gd, "is_connected", lambda: True)
+    asked = []
+
+    async def fake_get(self, url, params=None):
+        asked.append((url, params))
+
+        class Resp:
+            content = (b"<table><tr><td>Email</td></tr>"
+                       b"<tr><td>ada@acme.example</td></tr></table>")
+
+            def json(self):
+                return {"id": "d1", "name": "Oct domain data", "mimeType": gd.DOC_MIME}
+        return Resp()
+
+    monkeypatch.setattr(gd.DriveClient, "_get", fake_get)
+    with tempfile.TemporaryDirectory() as tmp:
+        async def go():
+            sm = await _state(tmp)
+            report = await li.import_source(
+                sm, "https://docs.google.com/document/d/1DocIdAbCdEfGhIj/edit", verify=_verified)
+            assert report.new_prospects == 1, report.errors
+        _run(go())
+    assert asked[0][0].endswith("/files/1DocIdAbCdEfGhIj")
+    assert asked[-1][0].endswith("/files/d1/export")
+    assert asked[-1][1] == {"mimeType": "text/html"}

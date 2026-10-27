@@ -51,10 +51,13 @@ SHEET_MIME = "application/vnd.google-apps.spreadsheet"
 CSV_MIMES = ("text/csv", "text/plain", "application/csv")
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 OLD_XLS_MIME = "application/vnd.ms-excel"
+DOC_MIME = "application/vnd.google-apps.document"
+LEAD_MIMES = (SHEET_MIME, XLSX_MIME, DOC_MIME, *CSV_MIMES)
 
 _SHEET_RE = re.compile(r"docs\.google\.com/spreadsheets/d/([A-Za-z0-9_-]{10,})")
 _FOLDER_RE = re.compile(r"drive\.google\.com/drive/(?:u/\d+/)?folders/([A-Za-z0-9_-]{10,})")
-_FILE_RE = re.compile(r"drive\.google\.com/(?:file/d/|open\?id=)([A-Za-z0-9_-]{10,})")
+_FILE_RE = re.compile(r"(?:drive\.google\.com/(?:file/d/|open\?id=)|"
+                      r"docs\.google\.com/document/(?:u/\d+/)?d/)([A-Za-z0-9_-]{10,})")
 
 
 class DriveError(RuntimeError):
@@ -124,6 +127,39 @@ def is_connected() -> bool:
 
 def parse_csv(text: str) -> list[list[str]]:
     return [row for row in csv.reader(io.StringIO(text.lstrip("\ufeff")))]
+
+
+_LINE_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+'-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+_LINE_DOMAIN_RE = re.compile(r"\b(?:https?://)?(?:www\.)?((?:[a-z0-9-]+\.)+[a-z]{2,})\b", re.I)
+
+
+def parse_doc_html(html: str) -> list[tuple[str, list[list[str]]]]:
+    """Leads in a Google Doc. Every table becomes rows as-is; with no
+    table, each line naming an email or a website becomes a row of
+    (Email, Website, Notes), the line itself kept as the note."""
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html, "html.parser")
+    tables = []
+    for i, table in enumerate(soup.find_all("table"), start=1):
+        rows = [[cell.get_text(" ", strip=True) for cell in tr.find_all(["td", "th"])]
+                for tr in table.find_all("tr")]
+        tables.append((f"table {i}", rows))
+    if tables:
+        return tables
+    rows = [["Email", "Website", "Notes"]]
+    for line in soup.get_text("\n").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        email_match = _LINE_EMAIL_RE.search(line)
+        email = email_match.group(0) if email_match else ""
+        rest = line.replace(email, " ") if email else line
+        domain_match = _LINE_DOMAIN_RE.search(rest)
+        domain = domain_match.group(1) if domain_match else ""
+        if email or domain:
+            rows.append([email, domain, line[:500]])
+    return [("text", rows)] if len(rows) > 1 else []
 
 
 _NS = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
@@ -309,11 +345,19 @@ class DriveClient:
         return parse_csv((await self.download(file_id)).decode("utf-8-sig", errors="replace"))
 
     async def file_tables(self, info: dict) -> list[tuple[str, list[list[str]]]]:
-        """(label, rows) for any lead file: a Google Sheet, Excel or CSV."""
+        """(label, rows) for any lead file: a Google Sheet or Doc, Excel or CSV."""
         file_id, name = info["id"], info.get("name", info["id"])
         mime = info.get("mimeType", "")
         if mime == SHEET_MIME:
             return await self.sheet_tables(file_id)
+        if mime == DOC_MIME:
+            resp = await self._get(f"{DRIVE_API}/files/{file_id}/export",
+                                   {"mimeType": "text/html"})
+            return [(f"{name} / {label}", rows)
+                    for label, rows in parse_doc_html(resp.content.decode("utf-8", errors="replace"))]
+        if mime.startswith("application/vnd.google-apps.") or mime == "application/pdf":
+            raise DriveError(f"{name} isn't a sheet, Doc, Excel or CSV file, so Harvey "
+                             "can't read leads from it.")
         if mime == OLD_XLS_MIME or name.lower().endswith(".xls"):
             raise DriveError(f"{name} is an old-style .xls file. Save it as .xlsx or CSV, "
                              "or open it with Google Sheets, then add that.")
@@ -322,13 +366,15 @@ class DriveClient:
                     for tab, rows in parse_xlsx(await self.download(file_id))]
         return [(name, await self.csv_file(file_id))]
 
-    async def search_files(self, name: str, limit: int = MAX_SEARCH_FILES) -> list[dict]:
-        """Sheets, Excel and CSV files whose name contains ``name``, newest
-        first: in My Drive, shared with me, and shared drives."""
-        escaped = name.replace("\\", "\\\\").replace("'", "\\'")
-        mimes = " or ".join(f"mimeType = '{m}'" for m in (SHEET_MIME, XLSX_MIME, *CSV_MIMES))
+    def _name_query(self, name: str) -> str:
+        # Drive matches name terms by word prefix, so a phrase is searched
+        # word by word: "domain data" finds "Oct 2026 Domain Data".
+        words = [w.replace("\\", "\\\\").replace("'", "\\'") for w in name.split()]
+        return " and ".join(f"name contains '{w}'" for w in words) + " and trashed = false"
+
+    async def _search(self, q: str, limit: int) -> list[dict]:
         params = {
-            "q": f"name contains '{escaped}' and trashed = false and ({mimes})",
+            "q": q,
             "fields": "files(id,name,mimeType,modifiedTime)",
             "orderBy": "modifiedTime desc",
             "pageSize": str(limit),
@@ -338,9 +384,20 @@ class DriveClient:
         }
         return ((await self._get(f"{DRIVE_API}/files", params)).json().get("files") or [])[:limit]
 
+    async def search_files(self, name: str, limit: int = MAX_SEARCH_FILES) -> list[dict]:
+        """Sheets, Docs, Excel and CSV files whose name contains every word
+        of ``name``, newest first: in My Drive, shared with me, and shared
+        drives."""
+        mimes = " or ".join(f"mimeType = '{m}'" for m in LEAD_MIMES)
+        return await self._search(f"{self._name_query(name)} and ({mimes})", limit)
+
+    async def search_any(self, name: str, limit: int = 5) -> list[dict]:
+        """Files of any type matching ``name``: to say why none could be read."""
+        return await self._search(self._name_query(name), limit)
+
     async def folder_files(self, folder_id: str) -> list[dict]:
         """Sheets, Excel and CSV files directly in a folder, newest first."""
-        mimes = " or ".join(f"mimeType = '{m}'" for m in (SHEET_MIME, XLSX_MIME, *CSV_MIMES))
+        mimes = " or ".join(f"mimeType = '{m}'" for m in LEAD_MIMES)
         files: list[dict] = []
         page = ""
         while len(files) < MAX_FOLDER_FILES:

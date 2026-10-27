@@ -203,6 +203,12 @@ class ImportReport:
         return ", ".join(parts)
 
 
+def _kind(mime: str) -> str:
+    if mime.startswith("application/vnd.google-apps."):
+        return "Google " + mime.rsplit(".", 1)[-1]
+    return mime or "unknown type"
+
+
 async def read_source(source: str, env) -> list[tuple[str, list[list[str]]]]:
     """(label, rows) for every table a source holds. Raises DriveError."""
     from harvey.integrations import google_drive as gd
@@ -223,8 +229,16 @@ async def read_source(source: str, env) -> list[tuple[str, list[list[str]]]]:
         files = (await drive.search_files(file_id) if kind == "name"
                  else await drive.folder_files(file_id))
         if kind == "name" and not files:
-            raise gd.DriveError(f"no sheet, Excel or CSV file whose name contains "
-                                f"'{file_id}' is visible to the signed-in account.")
+            others = await drive.search_any(file_id)
+            if others:
+                found = "; ".join(f"'{f.get('name', '')}' ({_kind(f.get('mimeType', ''))})"
+                                  for f in others)
+                raise gd.DriveError(f"found {found}, but none is a sheet, Doc, Excel or "
+                                    "CSV file Harvey can read.")
+            raise gd.DriveError(
+                f"no file whose name contains '{file_id}' is visible to the signed-in "
+                "Google account. Check the account that file is shared with, or add "
+                "the file's own link instead.")
         tables = []
         for f in files:
             try:
