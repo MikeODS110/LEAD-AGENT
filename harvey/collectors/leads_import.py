@@ -1,5 +1,5 @@
-"""IMPORT — leads someone else already found: a Google Sheet, a Drive folder
-of sheets, or a CSV.
+"""IMPORT — leads someone else already found: a Google Sheet, an Excel or CSV
+file (on Drive or this computer), or a Drive folder of them.
 
 Plenty of teams get a fresh lead sheet every day. Importing it puts those
 people into the same pipeline as anyone Harvey found itself: the website is
@@ -218,22 +218,22 @@ async def read_source(source: str, env) -> list[tuple[str, list[list[str]]]]:
         if kind == "sheet":
             return await drive.sheet_tables(file_id, gid)
         if kind == "file":
-            info = await drive.file_info(file_id)
-            if info.get("mimeType") == gd.SHEET_MIME:
-                return await drive.sheet_tables(file_id)
-            return [(info.get("name", file_id), await drive.csv_file(file_id))]
+            return await drive.file_tables(await drive.file_info(file_id))
         tables = []
         for f in await drive.folder_files(file_id):
-            if f.get("mimeType") == gd.SHEET_MIME:
-                tables.extend(await drive.sheet_tables(f["id"]))
-            else:
-                tables.append((f.get("name", f["id"]), await drive.csv_file(f["id"])))
+            try:
+                tables.extend(await drive.file_tables(f))
+            except gd.DriveError as e:
+                # One unreadable file doesn't stop the rest of the folder.
+                logger.warning(f"lead import: skipped {f.get('name', 'a file')}: {e}")
         return tables
     if re.match(r"^https?://", source, re.I):
         return [(source, await gd.fetch_public_csv(source))]
     path = Path(source).expanduser()
     if not path.is_file():
         raise gd.DriveError(f"{source} isn't a Google link, a CSV URL or a file on this computer.")
+    if path.suffix.lower() == ".xlsx":
+        return [(f"{path.name} / {tab}", rows) for tab, rows in gd.parse_xlsx(path.read_bytes())]
     return [(path.name, gd.parse_csv(path.read_text(encoding="utf-8-sig", errors="replace")))]
 
 

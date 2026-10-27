@@ -122,7 +122,7 @@ def test_local_csv_file_and_saved_sources(monkeypatch):
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "leads.csv")
         with open(path, "w", encoding="utf-8") as f:
-            f.write("﻿Email,First Name,Last Name,Company\n"
+            f.write("\ufeffEmail,First Name,Last Name,Company\n"
                     "eve@example.org,Eve,Example,Example Org\n")
 
         async def go():
@@ -185,3 +185,107 @@ def test_drive_client_credentials_fall_back_to_gmail_pair():
     assert gd.client_credentials(Env()) == ("gid", "gsecret")
     Env.google_client_id, Env.google_client_secret = "id", "secret"
     assert gd.client_credentials(Env()) == ("id", "secret")
+
+
+def _xlsx(rows_by_tab: dict[str, list[list[str]]]) -> bytes:
+    """A minimal real .xlsx: shared strings for text, numbers as values."""
+    import io
+    import zipfile
+    from xml.sax.saxutils import escape
+
+    strings: list[str] = []
+    sheets = []
+    for rows in rows_by_tab.values():
+        xml_rows = []
+        for r, row in enumerate(rows, start=1):
+            cells = []
+            for c, value in enumerate(row):
+                ref = f"{chr(65 + c)}{r}"
+                if value == "":
+                    continue
+                if value.replace(".", "").isdigit():
+                    cells.append(f'<c r="{ref}"><v>{value}</v></c>')
+                else:
+                    strings.append(value)
+                    cells.append(f'<c r="{ref}" t="s"><v>{len(strings) - 1}</v></c>')
+            xml_rows.append(f'<row r="{r}">{"".join(cells)}</row>')
+        sheets.append('<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+                      f'<sheetData>{"".join(xml_rows)}</sheetData></worksheet>')
+    main = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+    rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    tabs = "".join(f'<sheet name="{escape(n)}" sheetId="{i + 1}" r:id="rId{i + 1}"/>'
+                   for i, n in enumerate(rows_by_tab))
+    rels = "".join(f'<Relationship Id="rId{i + 1}" Target="worksheets/sheet{i + 1}.xml" '
+                   'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet"/>'
+                   for i in range(len(rows_by_tab)))
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("xl/workbook.xml", f'<workbook xmlns="{main}" xmlns:r="{rel}"><sheets>{tabs}</sheets></workbook>')
+        z.writestr("xl/_rels/workbook.xml.rels",
+                   f'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{rels}</Relationships>')
+        z.writestr("xl/sharedStrings.xml", f'<sst xmlns="{main}">'
+                   + "".join(f"<si><t>{escape(s)}</t></si>" for s in strings) + "</sst>")
+        for i, xml in enumerate(sheets):
+            z.writestr(f"xl/worksheets/sheet{i + 1}.xml", xml)
+    return buf.getvalue()
+
+
+def test_parse_xlsx_reads_every_tab_and_keeps_gaps():
+    data = _xlsx({
+        "Monday": [["Email", "Name", "Phone"], ["ada@acme.example", "Ada Example", "5550100"]],
+        "Tuesday": [["Email", "", "Company"], ["bo@widget.example", "", "Widget Co"]],
+    })
+    tables = gd.parse_xlsx(data)
+    assert [name for name, _ in tables] == ["Monday", "Tuesday"]
+    assert tables[0][1][1] == ["ada@acme.example", "Ada Example", "5550100"]
+    assert tables[1][1][1] == ["bo@widget.example", "", "Widget Co"]
+
+
+def test_parse_xlsx_rejects_other_files():
+    with pytest.raises(gd.DriveError):
+        gd.parse_xlsx(b"not a zip")
+
+
+def test_local_xlsx_file_imports():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "leads.xlsx")
+        with open(path, "wb") as f:
+            f.write(_xlsx({"Leads": [["Email", "First Name", "Company"],
+                                     ["eve@example.org", "Eve", "Example Org"]]}))
+
+        async def go():
+            sm = await _state(tmp)
+            report = await li.import_source(sm, path, verify=_verified)
+            assert report.new_prospects == 1 and not report.errors
+        _run(go())
+
+
+def test_drive_file_link_picks_the_right_reader(monkeypatch):
+    data = _xlsx({"Leads": [["Email"], ["ada@acme.example"]]})
+    monkeypatch.setattr(gd, "is_connected", lambda: True)
+
+    async def info(self, file_id):
+        return {"id": file_id, "name": "daily leads.xlsx", "mimeType": gd.XLSX_MIME}
+
+    async def download(self, file_id):
+        return data
+
+    monkeypatch.setattr(gd.DriveClient, "file_info", info)
+    monkeypatch.setattr(gd.DriveClient, "download", download)
+    with tempfile.TemporaryDirectory() as tmp:
+        async def go():
+            sm = await _state(tmp)
+            report = await li.import_source(
+                sm, "https://drive.google.com/file/d/1FileIdAbCdEfGh/view?usp=drivesdk",
+                verify=_verified)
+            assert report.new_prospects == 1 and not report.errors
+        _run(go())
+
+
+def test_old_xls_says_what_to_do():
+    async def go():
+        client = gd.DriveClient(object())
+        with pytest.raises(gd.DriveError, match=".xlsx"):
+            await client.file_tables({"id": "x", "name": "leads.xls",
+                                      "mimeType": gd.OLD_XLS_MIME})
+    _run(go())

@@ -47,6 +47,8 @@ MAX_FOLDER_FILES = 200
 
 SHEET_MIME = "application/vnd.google-apps.spreadsheet"
 CSV_MIMES = ("text/csv", "text/plain", "application/csv")
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+OLD_XLS_MIME = "application/vnd.ms-excel"
 
 _SHEET_RE = re.compile(r"docs\.google\.com/spreadsheets/d/([A-Za-z0-9_-]{10,})")
 _FOLDER_RE = re.compile(r"drive\.google\.com/drive/(?:u/\d+/)?folders/([A-Za-z0-9_-]{10,})")
@@ -112,7 +114,85 @@ def is_connected() -> bool:
 
 
 def parse_csv(text: str) -> list[list[str]]:
-    return [row for row in csv.reader(io.StringIO(text.lstrip("﻿")))]
+    return [row for row in csv.reader(io.StringIO(text.lstrip("\ufeff")))]
+
+
+_NS = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+# Uncompressed size cap for any one part of a workbook (zip bombs).
+MAX_XLSX_PART_BYTES = 50_000_000
+
+
+def _column_index(ref: str) -> int:
+    letters = "".join(ch for ch in ref if ch.isalpha()).upper()
+    index = 0
+    for ch in letters:
+        index = index * 26 + (ord(ch) - 64)
+    return max(index - 1, 0)
+
+
+def parse_xlsx(data: bytes) -> list[tuple[str, list[list[str]]]]:
+    """Every tab of an Excel (.xlsx) workbook as (tab name, rows): text
+    only, standard library only. Raises DriveError for anything else."""
+    import posixpath
+    import zipfile
+    from xml.etree import ElementTree as ET
+
+    try:
+        book = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile:
+        raise DriveError("that file isn't an Excel .xlsx workbook. Save it as .xlsx "
+                         "or CSV, or open it in Google Sheets.")
+
+    def read(name: str) -> bytes:
+        info = book.getinfo(name)
+        if info.file_size > MAX_XLSX_PART_BYTES:
+            raise DriveError("that workbook is too large to be a lead list.")
+        return book.read(name)
+
+    names = set(book.namelist())
+    try:
+        workbook = ET.fromstring(read("xl/workbook.xml"))
+        rels = ET.fromstring(read("xl/_rels/workbook.xml.rels"))
+    except (KeyError, ET.ParseError):
+        raise DriveError("that .xlsx workbook couldn't be read.")
+    targets = {r.get("Id"): r.get("Target", "") for r in rels}
+
+    text_tag = f"{{{_NS['m']}}}t"
+    shared: list[str] = []
+    if "xl/sharedStrings.xml" in names:
+        for si in ET.fromstring(read("xl/sharedStrings.xml")).findall("m:si", _NS):
+            shared.append("".join(t.text or "" for t in si.iter(text_tag)))
+
+    tables = []
+    for sheet in workbook.findall("m:sheets/m:sheet", _NS):
+        target = targets.get(sheet.get(f"{{{_REL_NS}}}id"), "")
+        path = (target.lstrip("/") if target.startswith("/")
+                else posixpath.normpath(posixpath.join("xl", target)))
+        if path not in names:
+            continue
+        rows: list[list[str]] = []
+        for row in ET.fromstring(read(path)).iter(f"{{{_NS['m']}}}row"):
+            cells: dict[int, str] = {}
+            for i, c in enumerate(row.findall("m:c", _NS)):
+                kind = c.get("t", "")
+                v = c.find("m:v", _NS)
+                if kind == "inlineStr":
+                    text = "".join(t.text or "" for t in c.iter(text_tag))
+                elif kind == "s":
+                    try:
+                        text = shared[int(v.text or "")] if v is not None else ""
+                    except (ValueError, IndexError):
+                        text = ""
+                else:
+                    text = (v.text or "") if v is not None else ""
+                    if kind == "" and text.endswith(".0"):
+                        text = text[:-2]          # 5550100.0 → 5550100
+                ref = c.get("r", "")
+                cells[_column_index(ref) if ref else i] = text
+            rows.append([cells.get(i, "") for i in range(max(cells) + 1)] if cells else [])
+        tables.append((sheet.get("name", ""), rows))
+    return tables
 
 
 class DriveClient:
@@ -211,14 +291,31 @@ class DriveClient:
                                 "supportsAllDrives": "true"})
         return resp.json()
 
-    async def csv_file(self, file_id: str) -> list[list[str]]:
+    async def download(self, file_id: str) -> bytes:
         resp = await self._get(f"{DRIVE_API}/files/{file_id}",
                                {"alt": "media", "supportsAllDrives": "true"})
-        return parse_csv(resp.content.decode("utf-8-sig", errors="replace"))
+        return resp.content
+
+    async def csv_file(self, file_id: str) -> list[list[str]]:
+        return parse_csv((await self.download(file_id)).decode("utf-8-sig", errors="replace"))
+
+    async def file_tables(self, info: dict) -> list[tuple[str, list[list[str]]]]:
+        """(label, rows) for any lead file: a Google Sheet, Excel or CSV."""
+        file_id, name = info["id"], info.get("name", info["id"])
+        mime = info.get("mimeType", "")
+        if mime == SHEET_MIME:
+            return await self.sheet_tables(file_id)
+        if mime == OLD_XLS_MIME or name.lower().endswith(".xls"):
+            raise DriveError(f"{name} is an old-style .xls file. Save it as .xlsx or CSV, "
+                             "or open it with Google Sheets, then add that.")
+        if mime == XLSX_MIME or name.lower().endswith(".xlsx"):
+            return [(f"{name} / {tab}", rows)
+                    for tab, rows in parse_xlsx(await self.download(file_id))]
+        return [(name, await self.csv_file(file_id))]
 
     async def folder_files(self, folder_id: str) -> list[dict]:
-        """Sheets and CSV files directly in a folder, newest first."""
-        mimes = " or ".join(f"mimeType = '{m}'" for m in (SHEET_MIME, *CSV_MIMES))
+        """Sheets, Excel and CSV files directly in a folder, newest first."""
+        mimes = " or ".join(f"mimeType = '{m}'" for m in (SHEET_MIME, XLSX_MIME, *CSV_MIMES))
         files: list[dict] = []
         page = ""
         while len(files) < MAX_FOLDER_FILES:

@@ -1127,7 +1127,7 @@ def main():
              "sources; sync: re-read all saved sources now; import: import once "
              "without saving")
     sub.add_argument("source", nargs="?", default="",
-                     help="Google Sheet link, Drive folder link, CSV URL or CSV file")
+                     help="Google Sheet, Drive file or folder link, CSV URL, or a CSV/.xlsx file")
     sub.set_defaults(func=cmd_leads)
 
     # harvey outbox
