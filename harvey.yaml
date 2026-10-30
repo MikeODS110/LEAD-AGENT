@@ -47,7 +47,7 @@ icp:
 channels:
   email:
     enabled: true
-    provider: "gmail"          # gmail (recommended) | microsoft | smtp | instantly
+    provider: "smtp"           # gmail (recommended) | microsoft | smtp | instantly
     max_daily_sends: 50
     require_approval: true      # native: review in Outbox; Instantly: sending held
     # link_domains: ["mainsite.com"]   # your own sites besides the sending
